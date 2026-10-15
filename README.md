@@ -84,7 +84,20 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
    In Easypanel: **Settings → Users → Generate API Key** (sometimes under Settings → Server → Users). Copy the key — that value is `EASYPANEL_TOKEN`.
 
 5. **Environment variables**  
-   In the service **Environment** tab, add the variables from [`.env.example`](.env.example). Important ones:
+   In the service **Environment** tab, paste the variables from [`.env.example`](.env.example) (at least `EASYPANEL_URL` and `EASYPANEL_TOKEN`).
+
+   **Required — enable Create env file**
+
+   Cron jobs inside this container start with a nearly empty process environment. Easypanel must write your variables to a file the worker can read:
+
+   1. Open **Environment**
+   2. Turn **on** **Create env file** (sometimes labeled like “Create e…”)
+   3. Set **Env file path** to `.env` (default is fine)
+   4. **Save** and redeploy / restart the service
+
+   Without this, the first run on start may work (or partially work) while later minute polls fail with `EASYPANEL_URL and EASYPANEL_TOKEN are required`. In healthy logs you should see something like `merged /app/.env` and `EASYPANEL_URL: set`.
+
+   Important ones:
 
    | Variable | Notes |
    |---|---|
@@ -99,7 +112,7 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
    | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Optional comma-separated filters |
 
 6. **Optional: WhatsApp failure alerts**  
-   If you want alerts only when a run has failures, also set `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, and `WHATSAPP_NUMBER_TO`, and create the Meta template `system_alert` (see [WhatsApp template](#whatsapp-template-system_alert) below). Skip these vars if you do not need alerts.
+   If you want alerts only when a run has failures, also set `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, and `WHATSAPP_NUMBER_TO`, and create the Meta template `system_alert` (see [WhatsApp template](#whatsapp-template-system_alert) below). Skip these vars if you do not need alerts. These must be in the same Environment editor with **Create env file** enabled so cron can read them too.
 
 7. **Deploy**  
    Save and deploy / enable the service. Wait for the image build and container start.
@@ -107,6 +120,8 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
 8. **Verify in Logs / Dozzle**  
    Open **Logs** in Easypanel (or [Dozzle](https://dozzle.dev/)). With `RUN_ON_START=true`, you should see something like:
 
+   - `[entrypoint] EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` (not `MISSING`)
+   - `merged /app/.env` (when Create env file is on)
    - `BACKUP RUN START`
    - auth ok against the Easypanel API
    - discovery of DB services / backup configs
@@ -239,7 +254,20 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
    No Easypanel: **Settings → Users → Generate API Key** (às vezes em Settings → Server → Users). Copie a chave — esse valor é o `EASYPANEL_TOKEN`.
 
 5. **Variáveis de ambiente**  
-   Na aba **Environment** do serviço, adicione as variáveis de [`.env.example`](.env.example). As importantes:
+   Na aba **Environment** do serviço, cole as variáveis de [`.env.example`](.env.example) (no mínimo `EASYPANEL_URL` e `EASYPANEL_TOKEN`).
+
+   **Obrigatório — ativar Create env file**
+
+   Os jobs do cron neste container sobem com o ambiente do processo quase vazio. O Easypanel precisa gravar as variáveis num arquivo que o worker consiga ler:
+
+   1. Abra **Environment** (Variáveis de ambiente)
+   2. Ative **Create env file** (às vezes aparece como “Create e…”)
+   3. Em **Env file path**, use `.env` (o padrão serve)
+   4. **Salve** e faça redeploy / restart do serviço
+
+   Sem isso, a execução na subida pode funcionar (ou parecer ok) e os polls seguintes falharem com `EASYPANEL_URL and EASYPANEL_TOKEN are required`. Nos logs saudáveis deve aparecer algo como `merged /app/.env` e `EASYPANEL_URL: set`.
+
+   As importantes:
 
    | Variável | Notas |
    |---|---|
@@ -254,7 +282,7 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
    | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Filtros opcionais separados por vírgula |
 
 6. **Opcional: alertas WhatsApp em falha**  
-   Se quiser alertas só quando a execução tiver falhas, configure também `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN` e `WHATSAPP_NUMBER_TO`, e crie o template Meta `system_alert` (veja [Template WhatsApp](#template-whatsapp-system_alert) abaixo). Pule essas vars se não precisar de alertas.
+   Se quiser alertas só quando a execução tiver falhas, configure também `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN` e `WHATSAPP_NUMBER_TO`, e crie o template Meta `system_alert` (veja [Template WhatsApp](#template-whatsapp-system_alert) abaixo). Pule essas vars se não precisar de alertas. Elas também precisam estar no mesmo editor de Environment com **Create env file** ativo para o cron conseguir lê-las.
 
 7. **Deploy**  
    Salve e faça o deploy / ative o serviço. Aguarde o build da imagem e a subida do container.
@@ -262,6 +290,8 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
 8. **Conferir nos Logs / Dozzle**  
    Abra os **Logs** no Easypanel (ou o [Dozzle](https://dozzle.dev/)). Com `RUN_ON_START=true`, você deve ver algo como:
 
+   - `[entrypoint] EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` (não `MISSING`)
+   - `merged /app/.env` (quando Create env file está ligado)
    - `BACKUP RUN START`
    - autenticação ok na API do Easypanel
    - descoberta de serviços de banco / configs de backup
