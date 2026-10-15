@@ -65,7 +65,10 @@ def load_env_file(path: Path, *, override: bool = True) -> int:
 
 
 def discover_env_files() -> list[Path]:
-    """Find EasyPanel / local env files (Create env file path is often `.env`)."""
+    """Find EasyPanel / local env files (Create env file path is often `.env`).
+
+    Only checks fixed paths — never rglob (can hang on large/network mounts).
+    """
     found: list[Path] = []
     seen: set[Path] = set()
 
@@ -90,16 +93,6 @@ def discover_env_files() -> list[Path]:
     ):
         if candidate and str(candidate) not in {"", "."}:
             add(candidate)
-
-    for root in (Path("/app"), Path("/data")):
-        if not root.is_dir():
-            continue
-        try:
-            for path in root.rglob(".env"):
-                if path.is_file():
-                    add(path)
-        except OSError:
-            continue
     return found
 
 
@@ -706,6 +699,7 @@ def poll_interval_seconds() -> int:
 
 def main_loop() -> int:
     """Long-running worker: inherits container env (no system cron)."""
+    log.info("python worker starting...")
     loaded_env, env_sources = load_runtime_env()
     log.info(
         "worker start | env_file_keys=%d sources=%s",
