@@ -16,7 +16,7 @@ services:
       - .env
     environment:
       TZ: ${TZ:-America/Sao_Paulo}
-      CRON_SCHEDULE: "${CRON_SCHEDULE:-* * * * *}"
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-60}"
       RESPECT_BACKUP_CRON: "${RESPECT_BACKUP_CRON:-true}"
       RUN_ON_START: ${RUN_ON_START:-true}
       ONLY_ENABLED: ${ONLY_ENABLED:-true}

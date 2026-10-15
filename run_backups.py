@@ -44,12 +44,16 @@ def load_env_file(path: Path, *, override: bool = True) -> int:
         raw_text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return 0
+    if raw_text.startswith("\ufeff"):
+        raw_text = raw_text[1:]
     for raw in raw_text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
+        if key.startswith("export "):
+            key = key[7:].strip()
         if not key:
             continue
         value = _unquote_env_value(value)
@@ -60,31 +64,51 @@ def load_env_file(path: Path, *, override: bool = True) -> int:
     return loaded
 
 
-def load_runtime_env() -> tuple[int, list[str]]:
-    """Load env from EasyPanel `.env` and the entrypoint dump for cron.
+def discover_env_files() -> list[Path]:
+    """Find EasyPanel / local env files (Create env file path is often `.env`)."""
+    found: list[Path] = []
+    seen: set[Path] = set()
 
-    EasyPanel "Create env file" writes `/app/.env` (or cwd `.env`) and may not
-    export every key into the process environment. Cron then only sees what we
-    dump — so we always read those files in Python.
-    """
-    sources: list[Path] = []
+    def add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            return
+        if resolved in seen or not resolved.is_file():
+            return
+        seen.add(resolved)
+        found.append(resolved)
+
     for candidate in (
         Path("/app/.env"),
         Path.cwd() / ".env",
+        Path("/data/.env"),
+        Path("/workspace/.env"),
         Path(os.getenv("ENV_FILE", "")),
+        Path(os.getenv("ENV_FILE_PATH", "")),
         PERSISTED_ENV_FILE,
     ):
-        if not candidate or str(candidate) in {"", "."}:
-            continue
-        resolved = candidate if candidate.is_absolute() else candidate.resolve()
-        if resolved not in sources:
-            sources.append(resolved)
+        if candidate and str(candidate) not in {"", "."}:
+            add(candidate)
 
+    for root in (Path("/app"), Path("/data")):
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob(".env"):
+                if path.is_file():
+                    add(path)
+        except OSError:
+            continue
+    return found
+
+
+def load_runtime_env() -> tuple[int, list[str]]:
+    """Load `.env` files into os.environ (Docker env is already present)."""
     total = 0
     used: list[str] = []
-    # `.env` first, then persisted dump overrides (live printenv at container start).
-    for path in sources:
-        n = load_env_file(path, override=True)
+    for path in discover_env_files():
+        n = load_env_file(path, override=False)
         if n:
             total += n
             used.append(f"{path}({n})")
@@ -665,5 +689,62 @@ def run() -> int:
     return 1 if failed else 0
 
 
+def _secret_status(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if value:
+        return f"set ({len(value)} chars)"
+    return "MISSING"
+
+
+def poll_interval_seconds() -> int:
+    raw = os.getenv("POLL_INTERVAL_SECONDS", "").strip()
+    if raw.isdigit():
+        return max(15, int(raw))
+    # CRON_SCHEDULE is kept for compatibility; default worker polls every minute.
+    return 60
+
+
+def main_loop() -> int:
+    """Long-running worker: inherits container env (no system cron)."""
+    loaded_env, env_sources = load_runtime_env()
+    log.info(
+        "worker start | env_file_keys=%d sources=%s",
+        loaded_env,
+        env_sources or ["(process env only)"],
+    )
+    log.info("EASYPANEL_URL: %s", _secret_status("EASYPANEL_URL"))
+    log.info("EASYPANEL_TOKEN: %s", _secret_status("EASYPANEL_TOKEN"))
+    wa = os.getenv("WHATSAPP_SYSTEM_ACCESS_TOKEN", "").strip()
+    log.info("WHATSAPP_*: %s", "set" if wa else "not set (alerts disabled)")
+
+    if env_bool("RUN_ON_START", True):
+        log.info("RUN_ON_START: forcing one backup pass (ignores per-backup cron)...")
+        os.environ["FORCE_BACKUP_RUN"] = "1"
+        try:
+            run()
+        finally:
+            os.environ.pop("FORCE_BACKUP_RUN", None)
+
+    interval = poll_interval_seconds()
+    log.info(
+        "polling every %ss | respect_backup_cron=%s | tz=%s",
+        interval,
+        env_bool("RESPECT_BACKUP_CRON", True),
+        os.getenv("TZ", "container-local"),
+    )
+    while True:
+        time.sleep(interval)
+        try:
+            run()
+        except Exception:
+            log.exception("poll tick crashed; continuing")
+
+
 if __name__ == "__main__":
+    if "--loop" in sys.argv or env_bool("WORKER_LOOP", True):
+        try:
+            sys.exit(main_loop())
+        except KeyboardInterrupt:
+            log.info("worker stopped")
+            sys.exit(0)
     sys.exit(run())

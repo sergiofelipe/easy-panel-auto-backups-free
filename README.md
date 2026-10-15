@@ -24,7 +24,8 @@ On Easypanel Free (and similar cases where the panel scheduler does not run), yo
 - Lists backup configs with `listDatabaseBackups` (Postgres, MySQL, MariaDB, Mongo)
 - Triggers each matching backup with `runDatabaseBackup`
 - Respects the **Cron** field from each EasyPanel backup config (`RESPECT_BACKUP_CRON`)
-- Worker poll interval inside Docker (`CRON_SCHEDULE`, default every minute; timezone via `TZ`)
+- In-process worker loop (no system cron — keeps Docker/EasyPanel env vars)
+- Poll interval via `POLL_INTERVAL_SECONDS` (default 60; timezone via `TZ`)
 - Optional force run once on container start (`RUN_ON_START`, ignores per-backup cron)
 - Filters by project/service and by `enabled` flag
 - Dry-run mode (list only, no POST)
@@ -55,7 +56,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-4. Check logs (`docker compose logs -f` or Dozzle). With default `RUN_ON_START=true`, one forced run happens immediately; then the worker polls on `CRON_SCHEDULE` and only triggers backups whose EasyPanel Cron is due.
+4. Check logs (`docker compose logs -f` or Dozzle). With default `RUN_ON_START=true`, one forced run happens immediately; then the worker polls every `POLL_INTERVAL_SECONDS` and only triggers backups whose EasyPanel Cron is due.
 
 ### Deploy on Easypanel
 
@@ -78,7 +79,7 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
    **If you see “Cannot access repository”:** you likely used an SSH URL (`git@github.com:...`) without a deploy key. Either switch the source URL to the HTTPS form above, or use **Generate SSH Key** in Easypanel and add that public key as a **Deploy Key** on the GitHub repo (Settings → Deploy keys). For this public repo, HTTPS is enough — no deploy key needed.
 
 3. **No public domain**  
-   Leave domains / public HTTP disabled (or ignore them). This container does not expose a web app; it only needs to stay **running** so cron can fire.
+   Leave domains / public HTTP disabled (or ignore them). This container does not expose a web app; it only needs to stay **running** so the worker loop can poll.
 
 4. **API key (`EASYPANEL_TOKEN`)**  
    In Easypanel: **Settings → Users → Generate API Key** (sometimes under Settings → Server → Users). Copy the key — that value is `EASYPANEL_TOKEN`.
@@ -86,16 +87,16 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
 5. **Environment variables**  
    In the service **Environment** tab, paste the variables from [`.env.example`](.env.example) (at least `EASYPANEL_URL` and `EASYPANEL_TOKEN`).
 
-   **Required — enable Create env file**
+   **Recommended — enable Create env file**
 
-   Cron jobs inside this container start with a nearly empty process environment. Easypanel must write your variables to a file the worker can read:
+   The worker runs as a long-lived Python process (no system cron), so it keeps the normal container environment. Still enable **Create env file** so EasyPanel also writes `/app/.env` as a fallback:
 
    1. Open **Environment**
    2. Turn **on** **Create env file** (sometimes labeled like “Create e…”)
-   3. Set **Env file path** to `.env` (default is fine)
+   3. Set **Env file path** to `.env`
    4. **Save** and redeploy / restart the service
 
-   Without this, the first run on start may work (or partially work) while later minute polls fail with `EASYPANEL_URL and EASYPANEL_TOKEN are required`. In healthy logs you should see something like `merged /app/.env` and `EASYPANEL_URL: set`.
+   In healthy logs you should see `EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` and then `polling every 60s`.
 
    Important ones:
 
@@ -103,7 +104,7 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
    |---|---|
    | `EASYPANEL_URL` | Panel URL, e.g. `https://panel.yourdomain.com` or `http://IP:3000` (with or without `/api`) |
    | `EASYPANEL_TOKEN` | API key from step 4 |
-   | `CRON_SCHEDULE` | Worker poll interval — default `* * * * *` (every minute) |
+   | `POLL_INTERVAL_SECONDS` | How often to check due backups — default `60` |
    | `RESPECT_BACKUP_CRON` | Default `true` — honor each backup’s Cron from the EasyPanel UI |
    | `TZ` | Default `America/Sao_Paulo` (must match how you think about panel schedules) |
    | `RUN_ON_START` | Default `true` — one forced run right after deploy (ignores per-backup cron; handy to validate) |
@@ -112,7 +113,7 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
    | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Optional comma-separated filters |
 
 6. **Optional: WhatsApp failure alerts**  
-   If you want alerts only when a run has failures, also set `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, and `WHATSAPP_NUMBER_TO`, and create the Meta template `system_alert` (see [WhatsApp template](#whatsapp-template-system_alert) below). Skip these vars if you do not need alerts. These must be in the same Environment editor with **Create env file** enabled so cron can read them too.
+   If you want alerts only when a run has failures, also set `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, and `WHATSAPP_NUMBER_TO`, and create the Meta template `system_alert` (see [WhatsApp template](#whatsapp-template-system_alert) below). Skip these vars if you do not need alerts.
 
 7. **Deploy**  
    Save and deploy / enable the service. Wait for the image build and container start.
@@ -120,13 +121,9 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
 8. **Verify in Logs / Dozzle**  
    Open **Logs** in Easypanel (or [Dozzle](https://dozzle.dev/)). With `RUN_ON_START=true`, you should see something like:
 
-   - `[entrypoint] EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` (not `MISSING`)
-   - `merged /app/.env` (when Create env file is on)
-   - `BACKUP RUN START`
-   - auth ok against the Easypanel API
-   - discovery of DB services / backup configs
-   - `RUN | ...` (or `DRY_RUN | ...`) for each backup triggered
-   - `BACKUP RUN END`
+   - `EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` (not `MISSING`)
+   - `RUN_ON_START: forcing one backup pass...` then `BACKUP RUN START` / `RUN | ...` / `BACKUP RUN END`
+   - `polling every 60s | respect_backup_cron=True`
 
    On the database service itself, a backup task may appear in progress (e.g. **Backup database**), same as when you click Manual Run in the UI. Afterwards the worker polls every minute and only runs a backup when its EasyPanel **Cron** matches.
 
@@ -138,7 +135,8 @@ Tip: start with `DRY_RUN=true` and `RUN_ON_START=true` once to confirm discovery
 |---|---|---|---|
 | `EASYPANEL_URL` | yes | — | Panel URL (with or without `/api`) |
 | `EASYPANEL_TOKEN` | yes | — | Bearer API key |
-| `CRON_SCHEDULE` | no | `* * * * *` | How often this worker checks for due backups (container local time) |
+| `POLL_INTERVAL_SECONDS` | no | `60` | How often the worker checks for due backups |
+| `CRON_SCHEDULE` | no | `* * * * *` | Kept for compatibility; prefer `POLL_INTERVAL_SECONDS` |
 | `RESPECT_BACKUP_CRON` | no | `true` | If `true`, only run when the backup’s EasyPanel Cron matches now |
 | `TZ` | no | `America/Sao_Paulo` | Timezone for schedule matching and logs |
 | `RUN_ON_START` | no | `true` | Force-run all matching backups once when the container starts |
@@ -174,7 +172,7 @@ Alerts are sent **only when there are failures**. If WhatsApp env vars are missi
 
 ### Logs and Dozzle
 
-All application and cron output goes to container **stdout/stderr**. With the default `docker-compose.yml` (`json-file` logging + `logging=dozzle` label), Dozzle (or `docker logs`) shows the same stream — look for banners like `BACKUP RUN START` / `BACKUP RUN END`.
+All application output goes to container **stdout/stderr**. With the default `docker-compose.yml` (`json-file` logging + `logging=dozzle` label), Dozzle (or `docker logs`) shows the same stream — look for banners like `BACKUP RUN START` / `BACKUP RUN END`.
 
 ### License
 
@@ -194,7 +192,8 @@ No Easypanel Free (e em casos semelhantes em que o agendador do painel não exec
 - Lista configs de backup com `listDatabaseBackups` (Postgres, MySQL, MariaDB, Mongo)
 - Dispara cada backup correspondente com `runDatabaseBackup`
 - Respeita o campo **Cron** de cada config de backup no EasyPanel (`RESPECT_BACKUP_CRON`)
-- Intervalo de verificação no Docker (`CRON_SCHEDULE`, padrão a cada minuto; fuso via `TZ`)
+- Loop em processo (sem cron do sistema — mantém o env do Docker/EasyPanel)
+- Intervalo de verificação via `POLL_INTERVAL_SECONDS` (padrão 60; fuso via `TZ`)
 - Execução forçada opcional ao subir o container (`RUN_ON_START`, ignora o cron de cada config)
 - Filtros por projeto/serviço e pela flag `enabled`
 - Modo dry-run (só lista, sem POST)
@@ -225,7 +224,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-4. Confira os logs (`docker compose logs -f` ou Dozzle). Com `RUN_ON_START=true` (padrão), uma execução forçada ocorre na subida; depois o worker faz poll em `CRON_SCHEDULE` e só dispara backups cujo Cron no EasyPanel está na hora.
+4. Confira os logs (`docker compose logs -f` ou Dozzle). Com `RUN_ON_START=true` (padrão), uma execução forçada ocorre na subida; depois o worker faz poll a cada `POLL_INTERVAL_SECONDS` e só dispara backups cujo Cron no EasyPanel está na hora.
 
 ### Instalar no Easypanel
 
@@ -248,7 +247,7 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
    **Se aparecer “Cannot access repository”:** provavelmente foi usada uma URL SSH (`git@github.com:...`) sem deploy key. Troque a URL para o HTTPS acima, **ou** use **Generate SSH Key** no Easypanel e adicione a chave pública como **Deploy Key** no GitHub (Settings → Deploy keys). Neste repositório público, HTTPS basta — não precisa de deploy key.
 
 3. **Sem domínio público**  
-   Deixe domínio / HTTP público desativado (ou ignore). Este container não expõe app web; só precisa permanecer **rodando** para o cron disparar.
+   Deixe domínio / HTTP público desativado (ou ignore). Este container não expõe app web; só precisa permanecer **rodando** para o loop do worker fazer poll.
 
 4. **API key (`EASYPANEL_TOKEN`)**  
    No Easypanel: **Settings → Users → Generate API Key** (às vezes em Settings → Server → Users). Copie a chave — esse valor é o `EASYPANEL_TOKEN`.
@@ -256,16 +255,16 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
 5. **Variáveis de ambiente**  
    Na aba **Environment** do serviço, cole as variáveis de [`.env.example`](.env.example) (no mínimo `EASYPANEL_URL` e `EASYPANEL_TOKEN`).
 
-   **Obrigatório — ativar Create env file**
+   **Recomendado — ativar Create env file**
 
-   Os jobs do cron neste container sobem com o ambiente do processo quase vazio. O Easypanel precisa gravar as variáveis num arquivo que o worker consiga ler:
+   O worker roda como processo Python contínuo (sem cron do sistema), então mantém o ambiente normal do container. Ainda assim, ative **Create env file** para o EasyPanel gravar também `/app/.env` como fallback:
 
    1. Abra **Environment** (Variáveis de ambiente)
    2. Ative **Create env file** (às vezes aparece como “Create e…”)
-   3. Em **Env file path**, use `.env` (o padrão serve)
+   3. Em **Env file path**, use `.env`
    4. **Salve** e faça redeploy / restart do serviço
 
-   Sem isso, a execução na subida pode funcionar (ou parecer ok) e os polls seguintes falharem com `EASYPANEL_URL and EASYPANEL_TOKEN are required`. Nos logs saudáveis deve aparecer algo como `merged /app/.env` e `EASYPANEL_URL: set`.
+   Nos logs saudáveis deve aparecer `EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` e depois `polling every 60s`.
 
    As importantes:
 
@@ -273,7 +272,7 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
    |---|---|
    | `EASYPANEL_URL` | URL do painel, ex.: `https://panel.seudominio.com` ou `http://IP:3000` (com ou sem `/api`) |
    | `EASYPANEL_TOKEN` | API key do passo 4 |
-   | `CRON_SCHEDULE` | Intervalo de verificação do worker — padrão `* * * * *` (a cada minuto) |
+   | `POLL_INTERVAL_SECONDS` | De quanto em quanto verifica backups na hora — padrão `60` |
    | `RESPECT_BACKUP_CRON` | Padrão `true` — respeita o Cron de cada backup na UI do EasyPanel |
    | `TZ` | Padrão `America/Sao_Paulo` (use o mesmo fuso em que você pensa os horários do painel) |
    | `RUN_ON_START` | Padrão `true` — uma execução forçada logo após o deploy (ignora cron das configs; útil para validar) |
@@ -282,7 +281,7 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
    | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Filtros opcionais separados por vírgula |
 
 6. **Opcional: alertas WhatsApp em falha**  
-   Se quiser alertas só quando a execução tiver falhas, configure também `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN` e `WHATSAPP_NUMBER_TO`, e crie o template Meta `system_alert` (veja [Template WhatsApp](#template-whatsapp-system_alert) abaixo). Pule essas vars se não precisar de alertas. Elas também precisam estar no mesmo editor de Environment com **Create env file** ativo para o cron conseguir lê-las.
+   Se quiser alertas só quando a execução tiver falhas, configure também `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN` e `WHATSAPP_NUMBER_TO`, e crie o template Meta `system_alert` (veja [Template WhatsApp](#template-whatsapp-system_alert) abaixo). Pule essas vars se não precisar de alertas.
 
 7. **Deploy**  
    Salve e faça o deploy / ative o serviço. Aguarde o build da imagem e a subida do container.
@@ -290,13 +289,9 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
 8. **Conferir nos Logs / Dozzle**  
    Abra os **Logs** no Easypanel (ou o [Dozzle](https://dozzle.dev/)). Com `RUN_ON_START=true`, você deve ver algo como:
 
-   - `[entrypoint] EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` (não `MISSING`)
-   - `merged /app/.env` (quando Create env file está ligado)
-   - `BACKUP RUN START`
-   - autenticação ok na API do Easypanel
-   - descoberta de serviços de banco / configs de backup
-   - `RUN | ...` (ou `DRY_RUN | ...`) para cada backup disparado
-   - `BACKUP RUN END`
+   - `EASYPANEL_URL: set` / `EASYPANEL_TOKEN: set` (não `MISSING`)
+   - `RUN_ON_START: forcing one backup pass...` depois `BACKUP RUN START` / `RUN | ...` / `BACKUP RUN END`
+   - `polling every 60s | respect_backup_cron=True`
 
    No próprio serviço de banco, pode aparecer uma tarefa de backup em andamento (ex.: **Backup database**), igual ao Manual Run na UI. Depois disso o worker verifica a cada minuto e só roda um backup quando o **Cron** dele no EasyPanel bate.
 
@@ -306,7 +301,8 @@ Dica: comece com `DRY_RUN=true` e `RUN_ON_START=true` uma vez para validar desco
 |---|---|---|---|
 | `EASYPANEL_URL` | sim | — | URL do painel (com ou sem `/api`) |
 | `EASYPANEL_TOKEN` | sim | — | API key (Bearer) |
-| `CRON_SCHEDULE` | não | `* * * * *` | De quanto em quanto este worker verifica se há backup na hora |
+| `POLL_INTERVAL_SECONDS` | não | `60` | De quanto em quanto o worker verifica se há backup na hora |
+| `CRON_SCHEDULE` | não | `* * * * *` | Mantido por compatibilidade; prefira `POLL_INTERVAL_SECONDS` |
 | `RESPECT_BACKUP_CRON` | não | `true` | Se `true`, só roda quando o Cron da config no EasyPanel bate agora |
 | `TZ` | não | `America/Sao_Paulo` | Fuso para matching de agenda e logs |
 | `RUN_ON_START` | não | `true` | Força todos os backups elegíveis uma vez ao iniciar o container |
@@ -342,7 +338,7 @@ Alertas são enviados **somente quando há falhas**. Se as variáveis WhatsApp e
 
 ### Logs e Dozzle
 
-Toda a saída da aplicação e do cron vai para **stdout/stderr** do container. Com o `docker-compose.yml` padrão (logging `json-file` + label `logging=dozzle`), o Dozzle (ou `docker logs`) mostra o mesmo fluxo — procure banners como `BACKUP RUN START` / `BACKUP RUN END`.
+Toda a saída da aplicação vai para **stdout/stderr** do container. Com o `docker-compose.yml` padrão (logging `json-file` + label `logging=dozzle`), o Dozzle (ou `docker logs`) mostra o mesmo fluxo — procure banners como `BACKUP RUN START` / `BACKUP RUN END`.
 
 ### Licença
 
