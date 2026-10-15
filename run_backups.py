@@ -28,12 +28,15 @@ PERSISTED_ENV_FILE = Path(
 STATE_DIR = Path(os.getenv("STATE_DIR", "/tmp/easypanel-backup-state"))
 
 
-def load_persisted_env(path: Path = PERSISTED_ENV_FILE) -> int:
-    """Load KEY=VALUE lines into os.environ without shell-sourcing.
+def _unquote_env_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
-    Cron cannot reliably `.` an env file when tokens contain $, quotes, etc.
-    The entrypoint dumps selected vars with printenv; we parse them here.
-    """
+
+def load_env_file(path: Path, *, override: bool = True) -> int:
+    """Load KEY=VALUE lines into os.environ (no shell). Returns keys applied."""
     if not path.is_file():
         return 0
     loaded = 0
@@ -46,16 +49,57 @@ def load_persisted_env(path: Path = PERSISTED_ENV_FILE) -> int:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
+        key = key.strip()
         if not key:
+            continue
+        value = _unquote_env_value(value)
+        if not override and key in os.environ and os.environ[key] != "":
             continue
         os.environ[key] = value
         loaded += 1
+    return loaded
+
+
+def load_runtime_env() -> tuple[int, list[str]]:
+    """Load env from EasyPanel `.env` and the entrypoint dump for cron.
+
+    EasyPanel "Create env file" writes `/app/.env` (or cwd `.env`) and may not
+    export every key into the process environment. Cron then only sees what we
+    dump — so we always read those files in Python.
+    """
+    sources: list[Path] = []
+    for candidate in (
+        Path("/app/.env"),
+        Path.cwd() / ".env",
+        Path(os.getenv("ENV_FILE", "")),
+        PERSISTED_ENV_FILE,
+    ):
+        if not candidate or str(candidate) in {"", "."}:
+            continue
+        resolved = candidate if candidate.is_absolute() else candidate.resolve()
+        if resolved not in sources:
+            sources.append(resolved)
+
+    total = 0
+    used: list[str] = []
+    # `.env` first, then persisted dump overrides (live printenv at container start).
+    for path in sources:
+        n = load_env_file(path, override=True)
+        if n:
+            total += n
+            used.append(f"{path}({n})")
+
     if "TZ" in os.environ:
         try:
             time.tzset()
         except (AttributeError, OSError):
             pass
-    return loaded
+    return total, used
+
+
+# Back-compat alias used in older log messages / mental model.
+def load_persisted_env(path: Path = PERSISTED_ENV_FILE) -> int:
+    return load_env_file(path, override=True)
 
 # Logs go to stdout so Dozzle (and docker logs) pick them up automatically.
 _handler = logging.StreamHandler(sys.stdout)
@@ -373,7 +417,7 @@ def notify_failures(errors: list[str]) -> None:
 
 def run() -> int:
     errors: list[str] = []
-    loaded_env = load_persisted_env()
+    loaded_env, env_sources = load_runtime_env()
     now = datetime.now()
     minute_key = now.strftime("%Y%m%d%H%M")
     cleanup_state()
@@ -383,17 +427,11 @@ def run() -> int:
     if not base_url or not token:
         msg = "EASYPANEL_URL and EASYPANEL_TOKEN are required"
         log.error(msg)
-        if loaded_env:
-            log.error(
-                "persisted env file had %d keys but URL/TOKEN still empty (%s)",
-                loaded_env,
-                PERSISTED_ENV_FILE,
-            )
-        elif not os.getenv("FORCE_BACKUP_RUN"):
-            log.error(
-                "persisted env file missing or empty (%s) — entrypoint did not dump env",
-                PERSISTED_ENV_FILE,
-            )
+        log.error(
+            "env keys loaded=%d sources=%s (check EasyPanel Environment + Create env file → .env)",
+            loaded_env,
+            env_sources or ["(none)"],
+        )
         # Avoid WhatsApp spam every minute for deploy/config mistakes.
         if env_bool("FORCE_BACKUP_RUN", False):
             notify_failures([msg])
