@@ -361,14 +361,28 @@ def run() -> int:
 
     client = EasyPanelClient(base_url, token)
 
+    # On force/verbose, log network steps — otherwise a slow panel looks hung
+    # after entrypoint's "running backups once on start". Quiet polls stay silent.
+    if force_run or verbose_poll:
+        log.info(
+            "connecting | url=%s | force=%s | respect_cron=%s | dry_run=%s",
+            client.base_url,
+            force_run,
+            respect_backup_cron,
+            dry_run,
+        )
     try:
         client.get_session()
+        if force_run or verbose_poll:
+            log.info("auth ok")
     except Exception as exc:
         msg = f"auth/session failed: {exc}"
         log.error(msg)
         notify_failures([msg])
         return 1
 
+    if force_run or verbose_poll:
+        log.info("discovering projects/services...")
     try:
         projects_payload = client.list_projects_and_services()
     except Exception as exc:
