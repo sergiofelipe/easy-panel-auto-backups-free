@@ -36,7 +36,7 @@ On Easypanel Free (and similar cases where the panel scheduler does not run), yo
 - Docker and Docker Compose (or deploy the image as an app on Easypanel)
 - Optional: Meta WhatsApp Cloud API credentials and an approved `system_alert` template for failure alerts
 
-### Quick start
+### Quick start (local Docker Compose)
 
 1. Clone the repo and copy the env template:
 
@@ -56,7 +56,26 @@ docker compose up -d --build
 
 4. Check logs (`docker compose logs -f` or Dozzle). With default `RUN_ON_START=true`, one run happens immediately; then cron waits for `CRON_SCHEDULE`.
 
-**Deploy on Easypanel:** create an App from this repo (or a built image), set the same env vars as in `.env.example`, and keep the container running so cron stays active. No public HTTP port is required.
+### Deploy on Easypanel
+
+Run this project **as a service on the same Easypanel panel** it backs up. It is an internal cron worker — no public HTTP app is required.
+
+1. In Easypanel, create a new **App** (or **Compose**) service in the project of your choice.
+2. Connect the GitHub repo [sergiofelipe/easy-panel-auto-backups-free](https://github.com/sergiofelipe/easy-panel-auto-backups-free), or point the build at this Dockerfile (upload / git clone of the same sources).
+3. Set the **build method** to **Dockerfile** (root `Dockerfile` in the repo).
+4. Generate an API key in Easypanel: **Settings → Server → Users → Generate API Key**. You will use it as `EASYPANEL_TOKEN`.
+5. In the service **Environment** tab, add the variables from [`.env.example`](.env.example). At minimum:
+
+   - `EASYPANEL_URL` — your panel URL (e.g. `https://panel.yourdomain.com`)
+   - `EASYPANEL_TOKEN` — the API key from step 4
+   - Optional but recommended: `CRON_SCHEDULE`, `TZ`, `RUN_ON_START`, `ONLY_ENABLED`
+   - Optional WhatsApp alerts: `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, `WHATSAPP_NUMBER_TO` (and template vars if needed)
+
+6. **Domain / port:** leave public domain disabled (or ignore it). This container does not serve HTTP; cron keeps it useful as long as the service stays **running**.
+7. Deploy / enable the service and wait for the build to finish.
+8. Open **Logs** in Easypanel (or [Dozzle](https://dozzle.dev/) if you use it) and look for `BACKUP RUN START` / `BACKUP RUN END`. With `RUN_ON_START=true`, the first run happens right after the container starts; later runs follow `CRON_SCHEDULE`.
+
+Tip: start with `DRY_RUN=true` once to confirm discovery and filters, then set it back to `false` for real `runDatabaseBackup` calls.
 
 ### Environment variables
 
@@ -130,7 +149,7 @@ No Easypanel Free (e em casos semelhantes em que o agendador do painel não exec
 - Docker e Docker Compose (ou deploy da imagem como app no Easypanel)
 - Opcional: credenciais Meta WhatsApp Cloud API e template `system_alert` aprovado para alertas de falha
 
-### Início rápido
+### Início rápido (Docker Compose local)
 
 1. Clone o repositório e copie o modelo de env:
 
@@ -150,9 +169,26 @@ docker compose up -d --build
 
 4. Confira os logs (`docker compose logs -f` ou Dozzle). Com `RUN_ON_START=true` (padrão), uma execução ocorre na subida; depois o cron aguarda `CRON_SCHEDULE`.
 
-**Deploy no Easypanel:** crie um App a partir deste repo (ou de uma imagem buildada), configure as mesmas variáveis do `.env.example` e mantenha o container rodando para o cron ficar ativo. Não é necessária porta HTTP pública.
+### Instalar no Easypanel
 
-### Variáveis de ambiente
+Rode este projeto **como um serviço no próprio Easypanel** que ele fará backup. É um worker de cron interno — não precisa de app HTTP público.
+
+1. No Easypanel, crie um novo serviço **App** (ou **Compose**) no projeto que preferir.
+2. Conecte o repositório GitHub [sergiofelipe/easy-panel-auto-backups-free](https://github.com/sergiofelipe/easy-panel-auto-backups-free), ou aponte o build para este Dockerfile (upload / git clone das mesmas fontes).
+3. Defina o **método de build** como **Dockerfile** (`Dockerfile` na raiz do repo).
+4. Gere uma API key no Easypanel: **Settings → Server → Users → Generate API Key**. Ela será o `EASYPANEL_TOKEN`.
+5. Na aba **Environment** do serviço, adicione as variáveis de [`.env.example`](.env.example). No mínimo:
+
+   - `EASYPANEL_URL` — URL do painel (ex.: `https://panel.seudominio.com`)
+   - `EASYPANEL_TOKEN` — a API key do passo 4
+   - Opcional, mas recomendado: `CRON_SCHEDULE`, `TZ`, `RUN_ON_START`, `ONLY_ENABLED`
+   - Alertas WhatsApp (opcional): `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, `WHATSAPP_NUMBER_TO` (e vars do template se precisar)
+
+6. **Domínio / porta:** deixe o domínio público desativado (ou ignore). Este container não serve HTTP; o cron funciona enquanto o serviço permanece **rodando**.
+7. Faça o deploy / ative o serviço e aguarde o build terminar.
+8. Abra os **Logs** no Easypanel (ou o [Dozzle](https://dozzle.dev/), se usar) e procure por `BACKUP RUN START` / `BACKUP RUN END`. Com `RUN_ON_START=true`, a primeira execução ocorre logo após o container subir; as seguintes seguem o `CRON_SCHEDULE`.
+
+Dica: comece com `DRY_RUN=true` uma vez para validar descoberta e filtros; depois volte para `false` para disparar `runDatabaseBackup` de verdade.
 
 | Variável | Obrigatória | Padrão | Descrição |
 |---|---|---|---|
