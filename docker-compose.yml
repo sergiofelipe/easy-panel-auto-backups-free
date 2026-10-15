@@ -1,0 +1,21 @@
+services:
+  auto-backups:
+    build: .
+    container_name: easypanel-auto-backups
+    restart: unless-stopped
+    # Dozzle reads docker logs automatically — keep stdout logging enabled.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=false"
+      - "logging=dozzle"
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+      CRON_SCHEDULE: ${CRON_SCHEDULE:-0 2 * * *}
+      RUN_ON_START: ${RUN_ON_START:-true}
+      ONLY_ENABLED: ${ONLY_ENABLED:-true}
