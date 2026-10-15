@@ -58,22 +58,60 @@ docker compose up -d --build
 
 ### Deploy on Easypanel
 
-Run this project **as a service on the same Easypanel panel** it backs up. It is an internal cron worker — no public HTTP app is required.
+Run this project **as a service on the same Easypanel panel** it backs up. It is an internal cron worker — no public HTTP app is required. Prefer an **App** service built with the repo **Dockerfile** (simpler than Compose for this project).
 
-1. In Easypanel, create a new **App** (or **Compose**) service in the project of your choice.
-2. Connect the GitHub repo [sergiofelipe/easy-panel-auto-backups-free](https://github.com/sergiofelipe/easy-panel-auto-backups-free), or point the build at this Dockerfile (upload / git clone of the same sources).
-3. Set the **build method** to **Dockerfile** (root `Dockerfile` in the repo).
-4. Generate an API key in Easypanel: **Settings → Server → Users → Generate API Key**. You will use it as `EASYPANEL_TOKEN`.
-5. In the service **Environment** tab, add the variables from [`.env.example`](.env.example). At minimum:
+1. **Create the service**  
+   In Easypanel, open a project → **Create service** → choose **App** (not Compose, unless you specifically want Compose).
 
-   - `EASYPANEL_URL` — your panel URL (e.g. `https://panel.yourdomain.com`)
-   - `EASYPANEL_TOKEN` — the API key from step 4
-   - Optional but recommended: `CRON_SCHEDULE`, `TZ`, `RUN_ON_START`, `ONLY_ENABLED`
-   - Optional WhatsApp alerts: `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, `WHATSAPP_NUMBER_TO` (and template vars if needed)
+2. **Source → Git (HTTPS)**  
+   Under source / repository, select **Git** and paste the **public HTTPS** URL (not SSH):
 
-6. **Domain / port:** leave public domain disabled (or ignore it). This container does not serve HTTP; cron keeps it useful as long as the service stays **running**.
-7. Deploy / enable the service and wait for the build to finish.
-8. Open **Logs** in Easypanel (or [Dozzle](https://dozzle.dev/) if you use it) and look for `BACKUP RUN START` / `BACKUP RUN END`. With `RUN_ON_START=true`, the first run happens right after the container starts; later runs follow `CRON_SCHEDULE`.
+   ```text
+   https://github.com/sergiofelipe/easy-panel-auto-backups-free.git
+   ```
+
+   - **Branch:** `main`  
+   - **Build path:** `/` (repository root)  
+   - **Build method:** **Dockerfile** (uses the root `Dockerfile`)
+
+   **If you see “Cannot access repository”:** you likely used an SSH URL (`git@github.com:...`) without a deploy key. Either switch the source URL to the HTTPS form above, or use **Generate SSH Key** in Easypanel and add that public key as a **Deploy Key** on the GitHub repo (Settings → Deploy keys). For this public repo, HTTPS is enough — no deploy key needed.
+
+3. **No public domain**  
+   Leave domains / public HTTP disabled (or ignore them). This container does not expose a web app; it only needs to stay **running** so cron can fire.
+
+4. **API key (`EASYPANEL_TOKEN`)**  
+   In Easypanel: **Settings → Users → Generate API Key** (sometimes under Settings → Server → Users). Copy the key — that value is `EASYPANEL_TOKEN`.
+
+5. **Environment variables**  
+   In the service **Environment** tab, add the variables from [`.env.example`](.env.example). Important ones:
+
+   | Variable | Notes |
+   |---|---|
+   | `EASYPANEL_URL` | Panel URL, e.g. `https://panel.yourdomain.com` or `http://IP:3000` (with or without `/api`) |
+   | `EASYPANEL_TOKEN` | API key from step 4 |
+   | `CRON_SCHEDULE` | Default `0 2 * * *` (02:00 container time) |
+   | `TZ` | Default `America/Sao_Paulo` |
+   | `RUN_ON_START` | Default `true` — one run right after deploy (handy to validate) |
+   | `ONLY_ENABLED` | Default `true` — only backup configs marked enabled in the UI |
+   | `DRY_RUN` | Optional: `true` once to list targets without triggering backups |
+   | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Optional comma-separated filters |
+
+6. **Optional: WhatsApp failure alerts**  
+   If you want alerts only when a run has failures, also set `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, and `WHATSAPP_NUMBER_TO`, and create the Meta template `system_alert` (see [WhatsApp template](#whatsapp-template-system_alert) below). Skip these vars if you do not need alerts.
+
+7. **Deploy**  
+   Save and deploy / enable the service. Wait for the image build and container start.
+
+8. **Verify in Logs / Dozzle**  
+   Open **Logs** in Easypanel (or [Dozzle](https://dozzle.dev/)). With `RUN_ON_START=true`, you should see something like:
+
+   - `BACKUP RUN START`
+   - auth ok against the Easypanel API
+   - discovery of DB services / backup configs
+   - `MANUAL RUN | ...` (or equivalent trigger lines) for each backup
+   - `BACKUP RUN END`
+
+   On the database service itself, a backup task may appear in progress (e.g. **Backup database**), same as when you click Manual Run in the UI. Later runs follow `CRON_SCHEDULE`.
 
 Tip: start with `DRY_RUN=true` once to confirm discovery and filters, then set it back to `false` for real `runDatabaseBackup` calls.
 
@@ -171,22 +209,60 @@ docker compose up -d --build
 
 ### Instalar no Easypanel
 
-Rode este projeto **como um serviço no próprio Easypanel** que ele fará backup. É um worker de cron interno — não precisa de app HTTP público.
+Rode este projeto **como um serviço no próprio Easypanel** que ele fará backup. É um worker de cron interno — não precisa de app HTTP público. Prefira um serviço **App** com build pelo **Dockerfile** do repositório (mais simples que Compose neste projeto).
 
-1. No Easypanel, crie um novo serviço **App** (ou **Compose**) no projeto que preferir.
-2. Conecte o repositório GitHub [sergiofelipe/easy-panel-auto-backups-free](https://github.com/sergiofelipe/easy-panel-auto-backups-free), ou aponte o build para este Dockerfile (upload / git clone das mesmas fontes).
-3. Defina o **método de build** como **Dockerfile** (`Dockerfile` na raiz do repo).
-4. Gere uma API key no Easypanel: **Settings → Server → Users → Generate API Key**. Ela será o `EASYPANEL_TOKEN`.
-5. Na aba **Environment** do serviço, adicione as variáveis de [`.env.example`](.env.example). No mínimo:
+1. **Criar o serviço**  
+   No Easypanel, abra um projeto → **Create service** → escolha **App** (não Compose, a menos que você queira Compose de propósito).
 
-   - `EASYPANEL_URL` — URL do painel (ex.: `https://panel.seudominio.com`)
-   - `EASYPANEL_TOKEN` — a API key do passo 4
-   - Opcional, mas recomendado: `CRON_SCHEDULE`, `TZ`, `RUN_ON_START`, `ONLY_ENABLED`
-   - Alertas WhatsApp (opcional): `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN`, `WHATSAPP_NUMBER_TO` (e vars do template se precisar)
+2. **Source → Git (HTTPS)**  
+   Em source / repositório, selecione **Git** e cole a URL **HTTPS pública** (não SSH):
 
-6. **Domínio / porta:** deixe o domínio público desativado (ou ignore). Este container não serve HTTP; o cron funciona enquanto o serviço permanece **rodando**.
-7. Faça o deploy / ative o serviço e aguarde o build terminar.
-8. Abra os **Logs** no Easypanel (ou o [Dozzle](https://dozzle.dev/), se usar) e procure por `BACKUP RUN START` / `BACKUP RUN END`. Com `RUN_ON_START=true`, a primeira execução ocorre logo após o container subir; as seguintes seguem o `CRON_SCHEDULE`.
+   ```text
+   https://github.com/sergiofelipe/easy-panel-auto-backups-free.git
+   ```
+
+   - **Branch:** `main`  
+   - **Build path:** `/` (raiz do repositório)  
+   - **Método de build:** **Dockerfile** (usa o `Dockerfile` na raiz)
+
+   **Se aparecer “Cannot access repository”:** provavelmente foi usada uma URL SSH (`git@github.com:...`) sem deploy key. Troque a URL para o HTTPS acima, **ou** use **Generate SSH Key** no Easypanel e adicione a chave pública como **Deploy Key** no GitHub (Settings → Deploy keys). Neste repositório público, HTTPS basta — não precisa de deploy key.
+
+3. **Sem domínio público**  
+   Deixe domínio / HTTP público desativado (ou ignore). Este container não expõe app web; só precisa permanecer **rodando** para o cron disparar.
+
+4. **API key (`EASYPANEL_TOKEN`)**  
+   No Easypanel: **Settings → Users → Generate API Key** (às vezes em Settings → Server → Users). Copie a chave — esse valor é o `EASYPANEL_TOKEN`.
+
+5. **Variáveis de ambiente**  
+   Na aba **Environment** do serviço, adicione as variáveis de [`.env.example`](.env.example). As importantes:
+
+   | Variável | Notas |
+   |---|---|
+   | `EASYPANEL_URL` | URL do painel, ex.: `https://panel.seudominio.com` ou `http://IP:3000` (com ou sem `/api`) |
+   | `EASYPANEL_TOKEN` | API key do passo 4 |
+   | `CRON_SCHEDULE` | Padrão `0 2 * * *` (02:00 no horário do container) |
+   | `TZ` | Padrão `America/Sao_Paulo` |
+   | `RUN_ON_START` | Padrão `true` — uma execução logo após o deploy (útil para validar) |
+   | `ONLY_ENABLED` | Padrão `true` — só configs de backup marcadas como enabled na UI |
+   | `DRY_RUN` | Opcional: `true` uma vez para listar alvos sem disparar backups |
+   | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Filtros opcionais separados por vírgula |
+
+6. **Opcional: alertas WhatsApp em falha**  
+   Se quiser alertas só quando a execução tiver falhas, configure também `WHATSAPP_SYSTEM_PHONE_NUMBER_ID`, `WHATSAPP_SYSTEM_ACCESS_TOKEN` e `WHATSAPP_NUMBER_TO`, e crie o template Meta `system_alert` (veja [Template WhatsApp](#template-whatsapp-system_alert) abaixo). Pule essas vars se não precisar de alertas.
+
+7. **Deploy**  
+   Salve e faça o deploy / ative o serviço. Aguarde o build da imagem e a subida do container.
+
+8. **Conferir nos Logs / Dozzle**  
+   Abra os **Logs** no Easypanel (ou o [Dozzle](https://dozzle.dev/)). Com `RUN_ON_START=true`, você deve ver algo como:
+
+   - `BACKUP RUN START`
+   - autenticação ok na API do Easypanel
+   - descoberta de serviços de banco / configs de backup
+   - `MANUAL RUN | ...` (ou linhas equivalentes) para cada backup
+   - `BACKUP RUN END`
+
+   No próprio serviço de banco, pode aparecer uma tarefa de backup em andamento (ex.: **Backup database**), igual ao Manual Run na UI. As próximas execuções seguem o `CRON_SCHEDULE`.
 
 Dica: comece com `DRY_RUN=true` uma vez para validar descoberta e filtros; depois volte para `false` para disparar `runDatabaseBackup` de verdade.
 
