@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -20,7 +21,41 @@ from pathlib import Path
 from typing import Any
 
 DATABASE_TYPES = frozenset({"postgres", "mysql", "mariadb", "mongo"})
+# Written by entrypoint for cron jobs (cron starts with a nearly empty env).
+PERSISTED_ENV_FILE = Path(
+    os.getenv("EASYPANEL_BACKUPS_ENV_FILE", "/etc/easypanel-backups.env")
+)
 STATE_DIR = Path(os.getenv("STATE_DIR", "/tmp/easypanel-backup-state"))
+
+
+def load_persisted_env(path: Path = PERSISTED_ENV_FILE) -> int:
+    """Load KEY=VALUE lines into os.environ without shell-sourcing.
+
+    Cron cannot reliably `.` an env file when tokens contain $, quotes, etc.
+    The entrypoint dumps selected vars with printenv; we parse them here.
+    """
+    if not path.is_file():
+        return 0
+    loaded = 0
+    try:
+        raw_text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    for raw in raw_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if not key:
+            continue
+        os.environ[key] = value
+        loaded += 1
+    if "TZ" in os.environ:
+        try:
+            time.tzset()
+        except (AttributeError, OSError):
+            pass
+    return loaded
 
 # Logs go to stdout so Dozzle (and docker logs) pick them up automatically.
 _handler = logging.StreamHandler(sys.stdout)
@@ -338,6 +373,7 @@ def notify_failures(errors: list[str]) -> None:
 
 def run() -> int:
     errors: list[str] = []
+    loaded_env = load_persisted_env()
     now = datetime.now()
     minute_key = now.strftime("%Y%m%d%H%M")
     cleanup_state()
@@ -347,7 +383,20 @@ def run() -> int:
     if not base_url or not token:
         msg = "EASYPANEL_URL and EASYPANEL_TOKEN are required"
         log.error(msg)
-        notify_failures([msg])
+        if loaded_env:
+            log.error(
+                "persisted env file had %d keys but URL/TOKEN still empty (%s)",
+                loaded_env,
+                PERSISTED_ENV_FILE,
+            )
+        elif not os.getenv("FORCE_BACKUP_RUN"):
+            log.error(
+                "persisted env file missing or empty (%s) — entrypoint did not dump env",
+                PERSISTED_ENV_FILE,
+            )
+        # Avoid WhatsApp spam every minute for deploy/config mistakes.
+        if env_bool("FORCE_BACKUP_RUN", False):
+            notify_failures([msg])
         return 1
 
     project_filter = _csv_set(os.getenv("EASYPANEL_PROJECTS"))
