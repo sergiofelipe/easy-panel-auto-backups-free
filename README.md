@@ -16,18 +16,19 @@ Serviço cron + Docker que dispara backups de banco do Easypanel pela API públi
 
 ### What it solves
 
-On Easypanel Free (and similar cases where the panel scheduler does not run), you can still configure database backup destinations and schedules in the UI, but those jobs may never fire automatically. This project runs on a schedule inside its own container and calls the same API used by **Manual Run** (`runDatabaseBackup`), so backups actually execute.
+On Easypanel Free (and similar cases where the panel scheduler does not run), you can still configure database backup destinations and schedules in the UI, but those jobs may never fire automatically. This project polls inside its own container (default: every minute) and calls the same API used by **Manual Run** (`runDatabaseBackup`) **only when each backup’s EasyPanel Cron matches the current time**, so schedules configured in the panel are honored.
 
 ### Features
 
 - Discovers projects and database services via `listProjectsAndServices`
 - Lists backup configs with `listDatabaseBackups` (Postgres, MySQL, MariaDB, Mongo)
 - Triggers each matching backup with `runDatabaseBackup`
-- Cron schedule inside Docker (`CRON_SCHEDULE`, timezone via `TZ`)
-- Optional run once on container start (`RUN_ON_START`)
+- Respects the **Cron** field from each EasyPanel backup config (`RESPECT_BACKUP_CRON`)
+- Worker poll interval inside Docker (`CRON_SCHEDULE`, default every minute; timezone via `TZ`)
+- Optional force run once on container start (`RUN_ON_START`, ignores per-backup cron)
 - Filters by project/service and by `enabled` flag
 - Dry-run mode (list only, no POST)
-- Logs to **stdout** for Docker / [Dozzle](https://dozzle.dev/)
+- Logs to **stdout** for Docker / [Dozzle](https://dozzle.dev/) (quiet when nothing is due)
 - On failures, WhatsApp alert via Meta Cloud API template `system_alert` (`{{1}}` = failure details)
 
 ### Requirements
@@ -54,7 +55,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-4. Check logs (`docker compose logs -f` or Dozzle). With default `RUN_ON_START=true`, one run happens immediately; then cron waits for `CRON_SCHEDULE`.
+4. Check logs (`docker compose logs -f` or Dozzle). With default `RUN_ON_START=true`, one forced run happens immediately; then the worker polls on `CRON_SCHEDULE` and only triggers backups whose EasyPanel Cron is due.
 
 ### Deploy on Easypanel
 
@@ -89,9 +90,10 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
    |---|---|
    | `EASYPANEL_URL` | Panel URL, e.g. `https://panel.yourdomain.com` or `http://IP:3000` (with or without `/api`) |
    | `EASYPANEL_TOKEN` | API key from step 4 |
-   | `CRON_SCHEDULE` | Default `0 2 * * *` (02:00 container time) |
-   | `TZ` | Default `America/Sao_Paulo` |
-   | `RUN_ON_START` | Default `true` — one run right after deploy (handy to validate) |
+   | `CRON_SCHEDULE` | Worker poll interval — default `* * * * *` (every minute) |
+   | `RESPECT_BACKUP_CRON` | Default `true` — honor each backup’s Cron from the EasyPanel UI |
+   | `TZ` | Default `America/Sao_Paulo` (must match how you think about panel schedules) |
+   | `RUN_ON_START` | Default `true` — one forced run right after deploy (ignores per-backup cron; handy to validate) |
    | `ONLY_ENABLED` | Default `true` — only backup configs marked enabled in the UI |
    | `DRY_RUN` | Optional: `true` once to list targets without triggering backups |
    | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Optional comma-separated filters |
@@ -108,12 +110,12 @@ Run this project **as a service on the same Easypanel panel** it backs up. It is
    - `BACKUP RUN START`
    - auth ok against the Easypanel API
    - discovery of DB services / backup configs
-   - `MANUAL RUN | ...` (or equivalent trigger lines) for each backup
+   - `RUN | ...` (or `DRY_RUN | ...`) for each backup triggered
    - `BACKUP RUN END`
 
-   On the database service itself, a backup task may appear in progress (e.g. **Backup database**), same as when you click Manual Run in the UI. Later runs follow `CRON_SCHEDULE`.
+   On the database service itself, a backup task may appear in progress (e.g. **Backup database**), same as when you click Manual Run in the UI. Afterwards the worker polls every minute and only runs a backup when its EasyPanel **Cron** matches.
 
-Tip: start with `DRY_RUN=true` once to confirm discovery and filters, then set it back to `false` for real `runDatabaseBackup` calls.
+Tip: start with `DRY_RUN=true` and `RUN_ON_START=true` once to confirm discovery and filters, then set `DRY_RUN=false` for real `runDatabaseBackup` calls. Set backup times in each app’s EasyPanel backup UI (e.g. `0 2 * * *`).
 
 ### Environment variables
 
@@ -121,13 +123,15 @@ Tip: start with `DRY_RUN=true` once to confirm discovery and filters, then set i
 |---|---|---|---|
 | `EASYPANEL_URL` | yes | — | Panel URL (with or without `/api`) |
 | `EASYPANEL_TOKEN` | yes | — | Bearer API key |
-| `CRON_SCHEDULE` | no | `0 2 * * *` | Cron expression (container local time) |
-| `TZ` | no | `America/Sao_Paulo` | Timezone for cron and logs |
-| `RUN_ON_START` | no | `true` | Run backups once when the container starts |
+| `CRON_SCHEDULE` | no | `* * * * *` | How often this worker checks for due backups (container local time) |
+| `RESPECT_BACKUP_CRON` | no | `true` | If `true`, only run when the backup’s EasyPanel Cron matches now |
+| `TZ` | no | `America/Sao_Paulo` | Timezone for schedule matching and logs |
+| `RUN_ON_START` | no | `true` | Force-run all matching backups once when the container starts |
 | `ONLY_ENABLED` | no | `true` | If `true`, only configs with `enabled=true` |
 | `EASYPANEL_PROJECTS` | no | (all) | Comma-separated project names to include |
 | `EASYPANEL_SERVICES` | no | (all) | Comma-separated service names to include |
 | `DRY_RUN` | no | `false` | If `true`, only log what would run (no `runDatabaseBackup`) |
+| `VERBOSE_POLL` | no | `false` | If `true`, log skips on every quiet poll tick |
 | `WHATSAPP_SYSTEM_PHONE_NUMBER_ID` | for alerts | — | Meta phone number ID |
 | `WHATSAPP_SYSTEM_ACCESS_TOKEN` | for alerts | — | Meta access token |
 | `WHATSAPP_NUMBER_TO` | for alerts | — | Recipient digits only (country + area + number), e.g. `5511999999999` |
@@ -167,18 +171,19 @@ All application and cron output goes to container **stdout/stderr**. With the de
 
 ### O que resolve
 
-No Easypanel Free (e em casos semelhantes em que o agendador do painel não executa), você ainda pode configurar destinos e horários de backup de banco na UI, mas esses jobs podem nunca disparar sozinhos. Este projeto roda em cron dentro do próprio container e chama a mesma API do **Execução Manual** (`runDatabaseBackup`), para que os backups de fato executem.
+No Easypanel Free (e em casos semelhantes em que o agendador do painel não executa), você ainda pode configurar destinos e horários de backup de banco na UI, mas esses jobs podem nunca disparar sozinhos. Este projeto faz poll dentro do próprio container (padrão: a cada minuto) e chama a mesma API do **Execução Manual** (`runDatabaseBackup`) **somente quando o Cron de cada backup no EasyPanel bate com o horário atual**, respeitando o que foi configurado na tela.
 
 ### Funcionalidades
 
 - Descobre projetos e serviços de banco via `listProjectsAndServices`
 - Lista configs de backup com `listDatabaseBackups` (Postgres, MySQL, MariaDB, Mongo)
 - Dispara cada backup correspondente com `runDatabaseBackup`
-- Agendamento cron no Docker (`CRON_SCHEDULE`, fuso via `TZ`)
-- Execução opcional ao subir o container (`RUN_ON_START`)
+- Respeita o campo **Cron** de cada config de backup no EasyPanel (`RESPECT_BACKUP_CRON`)
+- Intervalo de verificação no Docker (`CRON_SCHEDULE`, padrão a cada minuto; fuso via `TZ`)
+- Execução forçada opcional ao subir o container (`RUN_ON_START`, ignora o cron de cada config)
 - Filtros por projeto/serviço e pela flag `enabled`
 - Modo dry-run (só lista, sem POST)
-- Logs no **stdout** para Docker / [Dozzle](https://dozzle.dev/)
+- Logs no **stdout** para Docker / [Dozzle](https://dozzle.dev/) (silencioso quando nada está na hora)
 - Em falhas, alerta WhatsApp via Meta Cloud API com o template `system_alert` (`{{1}}` = detalhes da falha)
 
 ### Requisitos
@@ -205,7 +210,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-4. Confira os logs (`docker compose logs -f` ou Dozzle). Com `RUN_ON_START=true` (padrão), uma execução ocorre na subida; depois o cron aguarda `CRON_SCHEDULE`.
+4. Confira os logs (`docker compose logs -f` ou Dozzle). Com `RUN_ON_START=true` (padrão), uma execução forçada ocorre na subida; depois o worker faz poll em `CRON_SCHEDULE` e só dispara backups cujo Cron no EasyPanel está na hora.
 
 ### Instalar no Easypanel
 
@@ -240,9 +245,10 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
    |---|---|
    | `EASYPANEL_URL` | URL do painel, ex.: `https://panel.seudominio.com` ou `http://IP:3000` (com ou sem `/api`) |
    | `EASYPANEL_TOKEN` | API key do passo 4 |
-   | `CRON_SCHEDULE` | Padrão `0 2 * * *` (02:00 no horário do container) |
-   | `TZ` | Padrão `America/Sao_Paulo` |
-   | `RUN_ON_START` | Padrão `true` — uma execução logo após o deploy (útil para validar) |
+   | `CRON_SCHEDULE` | Intervalo de verificação do worker — padrão `* * * * *` (a cada minuto) |
+   | `RESPECT_BACKUP_CRON` | Padrão `true` — respeita o Cron de cada backup na UI do EasyPanel |
+   | `TZ` | Padrão `America/Sao_Paulo` (use o mesmo fuso em que você pensa os horários do painel) |
+   | `RUN_ON_START` | Padrão `true` — uma execução forçada logo após o deploy (ignora cron das configs; útil para validar) |
    | `ONLY_ENABLED` | Padrão `true` — só configs de backup marcadas como enabled na UI |
    | `DRY_RUN` | Opcional: `true` uma vez para listar alvos sem disparar backups |
    | `EASYPANEL_PROJECTS` / `EASYPANEL_SERVICES` | Filtros opcionais separados por vírgula |
@@ -259,24 +265,26 @@ Rode este projeto **como um serviço no próprio Easypanel** que ele fará backu
    - `BACKUP RUN START`
    - autenticação ok na API do Easypanel
    - descoberta de serviços de banco / configs de backup
-   - `MANUAL RUN | ...` (ou linhas equivalentes) para cada backup
+   - `RUN | ...` (ou `DRY_RUN | ...`) para cada backup disparado
    - `BACKUP RUN END`
 
-   No próprio serviço de banco, pode aparecer uma tarefa de backup em andamento (ex.: **Backup database**), igual ao Manual Run na UI. As próximas execuções seguem o `CRON_SCHEDULE`.
+   No próprio serviço de banco, pode aparecer uma tarefa de backup em andamento (ex.: **Backup database**), igual ao Manual Run na UI. Depois disso o worker verifica a cada minuto e só roda um backup quando o **Cron** dele no EasyPanel bate.
 
-Dica: comece com `DRY_RUN=true` uma vez para validar descoberta e filtros; depois volte para `false` para disparar `runDatabaseBackup` de verdade.
+Dica: comece com `DRY_RUN=true` e `RUN_ON_START=true` uma vez para validar descoberta e filtros; depois volte `DRY_RUN` para `false`. Configure os horários em cada app na tela de backup do EasyPanel (ex.: `0 2 * * *`).
 
 | Variável | Obrigatória | Padrão | Descrição |
 |---|---|---|---|
 | `EASYPANEL_URL` | sim | — | URL do painel (com ou sem `/api`) |
 | `EASYPANEL_TOKEN` | sim | — | API key (Bearer) |
-| `CRON_SCHEDULE` | não | `0 2 * * *` | Expressão cron (horário local do container) |
-| `TZ` | não | `America/Sao_Paulo` | Fuso para cron e logs |
-| `RUN_ON_START` | não | `true` | Executa backups uma vez ao iniciar o container |
+| `CRON_SCHEDULE` | não | `* * * * *` | De quanto em quanto este worker verifica se há backup na hora |
+| `RESPECT_BACKUP_CRON` | não | `true` | Se `true`, só roda quando o Cron da config no EasyPanel bate agora |
+| `TZ` | não | `America/Sao_Paulo` | Fuso para matching de agenda e logs |
+| `RUN_ON_START` | não | `true` | Força todos os backups elegíveis uma vez ao iniciar o container |
 | `ONLY_ENABLED` | não | `true` | Se `true`, só configs com `enabled=true` |
 | `EASYPANEL_PROJECTS` | não | (todos) | Projetos a incluir, separados por vírgula |
 | `EASYPANEL_SERVICES` | não | (todos) | Serviços a incluir, separados por vírgula |
 | `DRY_RUN` | não | `false` | Se `true`, só registra o que rodaria (sem `runDatabaseBackup`) |
+| `VERBOSE_POLL` | não | `false` | Se `true`, loga os skips a cada tick quieto |
 | `WHATSAPP_SYSTEM_PHONE_NUMBER_ID` | para alertas | — | Phone number ID da Meta |
 | `WHATSAPP_SYSTEM_ACCESS_TOKEN` | para alertas | — | Access token da Meta |
 | `WHATSAPP_NUMBER_TO` | para alertas | — | Destinatário só dígitos (DDI+DDD+número), ex.: `5511999999999` |

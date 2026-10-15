@@ -2,7 +2,8 @@
 """Trigger Easypanel database backups via the public API.
 
 Replaces the panel's built-in scheduler when the license does not run cron jobs.
-Docs: https://easypanel.io/docs/api
+Polls often (default every minute) and only runs backups whose EasyPanel cron
+matches the current minute (TZ). Docs: https://easypanel.io/docs/api
 """
 
 from __future__ import annotations
@@ -14,9 +15,12 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 DATABASE_TYPES = frozenset({"postgres", "mysql", "mariadb", "mongo"})
+STATE_DIR = Path(os.getenv("STATE_DIR", "/tmp/easypanel-backup-state"))
 
 # Logs go to stdout so Dozzle (and docker logs) pick them up automatically.
 _handler = logging.StreamHandler(sys.stdout)
@@ -35,6 +39,107 @@ def banner(title: str) -> None:
     log.info(line)
     log.info(title)
     log.info(line)
+
+
+def _parse_cron_field(field: str, minimum: int, maximum: int) -> set[int]:
+    """Parse one standard cron field (*, lists, ranges, steps) into ints."""
+    values: set[int] = set()
+    for part in field.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        step = 1
+        if "/" in part:
+            base, step_s = part.split("/", 1)
+            step = int(step_s)
+            if step < 1:
+                raise ValueError(f"invalid cron step in {field!r}")
+        else:
+            base = part
+
+        if base == "*":
+            start, end = minimum, maximum
+        elif "-" in base:
+            a, b = base.split("-", 1)
+            start, end = int(a), int(b)
+        else:
+            start = int(base)
+            end = maximum if "/" in part else start
+
+        if start < minimum or end > maximum or start > end:
+            raise ValueError(f"cron field out of range {minimum}-{maximum}: {field!r}")
+        values.update(range(start, end + 1, step))
+    return values
+
+
+def cron_matches(expr: str, dt: datetime) -> bool:
+    """Return True if a 5-field cron expression matches dt (local time).
+
+    Day-of-month and day-of-week follow Vixie cron: if both are restricted
+    (not *), the day matches when either field matches.
+    """
+    fields = expr.strip().split()
+    if len(fields) != 5:
+        raise ValueError(f"expected 5 cron fields, got {len(fields)}: {expr!r}")
+
+    minute_f, hour_f, dom_f, month_f, dow_f = fields
+    if dt.minute not in _parse_cron_field(minute_f, 0, 59):
+        return False
+    if dt.hour not in _parse_cron_field(hour_f, 0, 23):
+        return False
+    if dt.month not in _parse_cron_field(month_f, 1, 12):
+        return False
+
+    # Python: Mon=0..Sun=6 → cron: Sun=0..Sat=6 (also accept 7 = Sunday)
+    cron_dow = (dt.weekday() + 1) % 7
+    dow_values = _parse_cron_field(dow_f, 0, 7)
+    if 7 in dow_values:
+        dow_values.add(0)
+    dow_ok = cron_dow in dow_values
+    dom_ok = dt.day in _parse_cron_field(dom_f, 1, 31)
+
+    dom_any = dom_f.strip() == "*"
+    dow_any = dow_f.strip() == "*"
+    if dom_any and dow_any:
+        return True
+    if not dom_any and not dow_any:
+        return dom_ok or dow_ok
+    if dom_any:
+        return dow_ok
+    return dom_ok
+
+
+def backup_cron_expr(backup: dict[str, Any]) -> str | None:
+    for key in ("cron", "schedule", "cronExpression", "crontab"):
+        raw = backup.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
+def claim_fire_slot(backup_id: str, minute_key: str) -> bool:
+    """Atomically claim this backup for this minute. False = already claimed."""
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    path = STATE_DIR / f"{backup_id}_{minute_key}"
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.close(fd)
+        return True
+    except FileExistsError:
+        return False
+
+
+def cleanup_state(keep_minutes: int = 180) -> None:
+    """Drop old claim files so /tmp does not grow forever."""
+    if not STATE_DIR.is_dir():
+        return
+    cutoff = datetime.now().timestamp() - keep_minutes * 60
+    for path in STATE_DIR.iterdir():
+        try:
+            if path.is_file() and path.stat().st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 class EasyPanelClient:
@@ -232,8 +337,10 @@ def notify_failures(errors: list[str]) -> None:
 
 
 def run() -> int:
-    banner("BACKUP RUN START")
     errors: list[str] = []
+    now = datetime.now()
+    minute_key = now.strftime("%Y%m%d%H%M")
+    cleanup_state()
 
     base_url = os.getenv("EASYPANEL_URL", "").strip()
     token = os.getenv("EASYPANEL_TOKEN", "").strip()
@@ -247,28 +354,21 @@ def run() -> int:
     service_filter = _csv_set(os.getenv("EASYPANEL_SERVICES"))
     only_enabled = env_bool("ONLY_ENABLED", True)
     dry_run = env_bool("DRY_RUN", False)
-
-    log.info(
-        "filters projects=%s services=%s only_enabled=%s dry_run=%s",
-        sorted(project_filter) if project_filter else "ALL",
-        sorted(service_filter) if service_filter else "ALL",
-        only_enabled,
-        dry_run,
-    )
+    respect_backup_cron = env_bool("RESPECT_BACKUP_CRON", True)
+    # RUN_ON_START sets FORCE_BACKUP_RUN=1 once so the first pass ignores schedules.
+    force_run = env_bool("FORCE_BACKUP_RUN", False)
+    verbose_poll = env_bool("VERBOSE_POLL", False)
 
     client = EasyPanelClient(base_url, token)
 
-    log.info("auth check -> %s", client.base_url)
     try:
         client.get_session()
-        log.info("auth ok")
     except Exception as exc:
         msg = f"auth/session failed: {exc}"
         log.error(msg)
         notify_failures([msg])
         return 1
 
-    log.info("discovering projects/services...")
     try:
         projects_payload = client.list_projects_and_services()
     except Exception as exc:
@@ -292,22 +392,14 @@ def run() -> int:
         db_services = [s for s in db_services if s.get("name") in service_filter]
 
     if not db_services:
-        log.warning("no database services found matching filters")
-        banner("BACKUP RUN END (nothing to do)")
+        if verbose_poll or force_run:
+            log.warning("no database services found matching filters")
         return 0
-
-    log.info("found %d database service(s):", len(db_services))
-    for service in db_services:
-        log.info(
-            "  - %s/%s (%s)",
-            service.get("projectName"),
-            service.get("name"),
-            service.get("type"),
-        )
 
     triggered = 0
     skipped = 0
     failed = 0
+    due_found = False
 
     for service in db_services:
         project_name = service.get("projectName")
@@ -317,7 +409,6 @@ def run() -> int:
             skipped += 1
             continue
 
-        log.info("--- %s/%s (%s) ---", project_name, service_name, service_type)
         try:
             backups_payload = client.list_database_backups(
                 str(project_name), str(service_name)
@@ -331,10 +422,7 @@ def run() -> int:
 
         backups = extract_backups(backups_payload)
         if not backups:
-            log.info("no backup configs on this service")
             continue
-
-        log.info("found %d backup config(s)", len(backups))
 
         for backup in backups:
             backup_id = str(backup["id"])
@@ -346,31 +434,105 @@ def run() -> int:
                 or backup.get("storageProviderId")
                 or "?"
             )
+            cron_expr = backup_cron_expr(backup)
 
             if only_enabled and enabled is False:
+                skipped += 1
+                if verbose_poll or force_run:
+                    log.info(
+                        "SKIP disabled | %s/%s | id=%s | db=%s",
+                        project_name,
+                        service_name,
+                        backup_id,
+                        database_name,
+                    )
+                continue
+
+            if respect_backup_cron and not force_run:
+                if not cron_expr:
+                    skipped += 1
+                    log.warning(
+                        "SKIP no cron on backup config | %s/%s | id=%s | db=%s",
+                        project_name,
+                        service_name,
+                        backup_id,
+                        database_name,
+                    )
+                    continue
+                try:
+                    is_due = cron_matches(cron_expr, now)
+                except ValueError as exc:
+                    msg = (
+                        f"invalid cron {cron_expr!r} on {project_name}/{service_name} "
+                        f"id={backup_id}: {exc}"
+                    )
+                    log.error(msg)
+                    errors.append(msg)
+                    failed += 1
+                    continue
+                if not is_due:
+                    skipped += 1
+                    if verbose_poll:
+                        log.info(
+                            "SKIP not due | %s/%s | cron=%s | id=%s | db=%s",
+                            project_name,
+                            service_name,
+                            cron_expr,
+                            backup_id,
+                            database_name,
+                        )
+                    continue
+
+            if not claim_fire_slot(backup_id, minute_key):
+                skipped += 1
                 log.info(
-                    "SKIP disabled | id=%s | db=%s | dest=%s",
+                    "SKIP already claimed this minute | id=%s | db=%s",
                     backup_id,
                     database_name,
-                    destination,
                 )
-                skipped += 1
                 continue
+
+            if not due_found:
+                due_found = True
+                banner("BACKUP RUN START")
+                log.info(
+                    "now=%s tz=%s respect_cron=%s force=%s dry_run=%s",
+                    now.strftime("%Y-%m-%d %H:%M:%S"),
+                    os.getenv("TZ", "container-local"),
+                    respect_backup_cron,
+                    force_run,
+                    dry_run,
+                )
+                log.info(
+                    "filters projects=%s services=%s only_enabled=%s",
+                    sorted(project_filter) if project_filter else "ALL",
+                    sorted(service_filter) if service_filter else "ALL",
+                    only_enabled,
+                )
+
+            log.info(
+                "--- %s/%s (%s) ---",
+                project_name,
+                service_name,
+                service_type,
+            )
 
             if dry_run:
                 log.info(
-                    "DRY_RUN | id=%s | db=%s | dest=%s",
+                    "DRY_RUN | id=%s | db=%s | cron=%s | dest=%s",
                     backup_id,
                     database_name,
+                    cron_expr or "-",
                     destination,
                 )
                 triggered += 1
                 continue
 
             log.info(
-                "MANUAL RUN | id=%s | db=%s | dest=%s",
+                "RUN | id=%s | db=%s | cron=%s | dest=%s",
                 backup_id,
                 database_name,
+                cron_expr or "-",
                 destination,
             )
             try:
@@ -386,9 +548,18 @@ def run() -> int:
                 log.error("FAIL | %s", msg)
                 errors.append(msg)
 
-    banner(
-        f"BACKUP RUN END | triggered={triggered} skipped={skipped} failed={failed}"
-    )
+    if due_found or failed:
+        banner(
+            f"BACKUP RUN END | triggered={triggered} skipped={skipped} failed={failed}"
+        )
+    elif verbose_poll or force_run:
+        log.info(
+            "poll | now=%s | due=0 | skipped=%s | failed=%s",
+            now.strftime("%H:%M"),
+            skipped,
+            failed,
+        )
+
     notify_failures(errors)
     return 1 if failed else 0
 

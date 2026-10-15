@@ -3,7 +3,8 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     TZ=America/Sao_Paulo \
-    CRON_SCHEDULE="0 2 * * *" \
+    CRON_SCHEDULE="* * * * *" \
+    RESPECT_BACKUP_CRON=true \
     RUN_ON_START=true \
     ONLY_ENABLED=true
 
